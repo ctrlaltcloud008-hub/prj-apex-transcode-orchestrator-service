@@ -1,0 +1,13 @@
+APP_ENV: development
+PORT: ":8080"
+SERVICE: transcode-orchestrator
+REGION: asia-south1
+PROJECT_ID: apex-494315
+SPANNER_DATABASE: projects/apex-494315/instances/apex-spanner-instance/databases/apex-database
+SUBSCRIPTION: projects/apex-494315/subscriptions/sub-transcode-orch
+COMPLETION_SUBSCRIPTION: projects/apex-494315/subscriptions/sub-transcode-completion
+NORMAL_TOPIC: projects/apex-494315/topics/transcode.job.requested
+PRIORITY_TOPIC: projects/apex-494315/topics/transcode.job.requested.priority
+MAX_RENDITION_ATTEMPTS: 3
+STALL_THRESHOLD_MINUTES: 15
+OUTPUT_GCS_BUCKET: prj-apex-trancoded-data

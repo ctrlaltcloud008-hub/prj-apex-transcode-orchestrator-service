@@ -1,0 +1,9 @@
+.git
+.megamemory
+terraform
+
+.gitignore
+Justfile
+LICENSE
+README.md
+service-graph*.yaml

@@ -1,0 +1,111 @@
+service:
+  name: prj-apex-transcode-orchestrator-service
+  team: APEX
+  language: go
+  runtime: cloud-run
+  repo: github.com/ctrlaltcloud008-hub/prj-apex-transcode-orchestrator-service
+  gcp_project: apex-494315
+  pipeline_stage: TRANSCODING
+
+inbound:
+  api:
+    - path: /healthz
+      method: GET
+      auth: none
+      note: Liveness/health check.
+    - path: /stall-sweep
+      method: POST
+      auth: Cloud Scheduler OIDC token (service account)
+      note: Every 5 min; re-dispatches transcode_jobs stuck in PROCESSING past the stall threshold (default 15 min).
+  pubsub:
+    - subscription: sub-transcode-orch
+      topic: video.validated
+      type: pull
+      payload: json
+      note: Fan-out path; creates per-rendition transcode_jobs and dispatches work items.
+      dlq_topic: video.dlq
+      ack_deadline_seconds: 60
+      max_delivery_attempts: 5
+    - subscription: sub-transcode-completion
+      topic: transcode.job.completed
+      type: pull
+      payload: json
+      note: Completion-tracking path; marks renditions done/failed, retries, and transitions the video when all renditions finish.
+      dlq_topic: video.dlq
+      ack_deadline_seconds: 60
+      max_delivery_attempts: 5
+
+outbound:
+  api: []
+  pubsub: []
+
+infrastructure:
+  databases:
+    - type: spanner
+      instance: apex-spanner-instance
+      database: apex-database
+      schema_name: public
+      tables:
+        - name: videos
+          access: read-write
+          operations: [select, update]
+          key_columns: [video_id]
+          description: Reads status/user_tier/source/rendition_ladder for dispatch; updates status to TRANSCODING, then TRANSCODED (all renditions done) or FAILED (attempts exhausted).
+        - name: transcode_jobs
+          access: read-write
+          operations: [select, insert, update]
+          key_columns: [video_id, rendition_name]
+          description: Creates per-rendition PENDING jobs; marks COMPLETED/FAILED; retries with incremented attempt; scans/redispatches stalled PROCESSING jobs.
+        - name: outbox
+          access: write
+          operations: [insert]
+          key_columns: [entry_id]
+          description: Writes transcode.job.requested(.priority) dispatch entries and the video.transcoded event transactionally with the state changes.
+        - name: video_lifecycle_events
+          access: write
+          operations: [insert]
+          key_columns: [video_id, event_seq]
+          description: Appends VALIDATED to TRANSCODING, TRANSCODING to TRANSCODED, and TRANSCODING to FAILED lifecycle events.
+        - name: video_stages
+          access: write
+          operations: [insert]
+          key_columns: [video_id, stage, attempt]
+          description: Inserts the TRANSCODING stage record.
+
+pipeline:
+  outbox:
+    enabled: true
+    topics_published: [transcode.job.requested, transcode.job.requested.priority, video.transcoded]
+    shard_count: 4
+  idempotency:
+    mechanism: dedup_check
+    description: Dispatch is guarded by a VALIDATED status check plus JobsAlreadyCreated (existing transcode_jobs short-circuit); completion handling uses conditional UPDATEs (WHERE status='PROCESSING', rowCount==0 skip) so replays are no-ops.
+  state_transitions:
+    - from_state: VALIDATED
+      to_state: TRANSCODING
+    - from_state: TRANSCODING
+      to_state: TRANSCODED
+    - from_state: TRANSCODING
+      to_state: FAILED
+  sweep_jobs:
+    - name: transcode-stall-sweep
+      relationship: owned_by
+      description: Cloud Scheduler POST /stall-sweep every 5 min; finds transcode_jobs stuck in PROCESSING past the stall threshold and re-dispatches them with an incremented attempt.
+
+observability:
+  logs:
+    provider: google-cloud-logging
+    structure: true
+    mandatory_fields: [service, region, app_env, event_type]
+  tracing:
+    provider: google-cloud-trace
+    propagation: w3c-transparent
+    via: http-header
+  alerts: []
+  slos: []
+
+depends_on:
+  - service: prj-apex-outbox-poller-service
+    relationship: consumes_event_from
+    via: pubsub
+    topic: video.validated
